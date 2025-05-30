@@ -273,9 +273,78 @@ class AIAnalyzer:
             logging.error(f"خطا در تحلیل الگوها: {e}")
             return "خطا در تحلیل"
 
+    def estimate_hba1c(self, avg_glucose):
+        """محاسبه HbA1c تخمینی بر اساس میانگین قند خون (فرمول ADA)"""
+        # HbA1c(%) = (میانگین قند خون + 46.7) / 28.7
+        try:
+            hba1c = (avg_glucose + 46.7) / 28.7
+            return round(hba1c, 2)
+        except:
+            return None
+
+    def detect_crisis(self, readings, low=70, high=180):
+        """شناسایی بحران قند خون (افت یا افزایش شدید)"""
+        crisis = []
+        for r in readings:
+            try:
+                glucose = r[5]
+                if glucose < low:
+                    crisis.append((r[3], r[4], glucose, 'پایین'))
+                elif glucose > high:
+                    crisis.append((r[3], r[4], glucose, 'بالا'))
+            except:
+                continue
+        return crisis
+
+    def mood_glucose_correlation(self, readings):
+        """تحلیل رابطه بین حالت روحی و قند خون"""
+        try:
+            if not readings or len(readings) < 10:
+                return None
+            mood_map = {}
+            for r in readings:
+                mood = r[8] if len(r) > 8 else 'متوسط'
+                glucose = r[5]
+                if mood not in mood_map:
+                    mood_map[mood] = []
+                mood_map[mood].append(glucose)
+            mood_avg = {m: sum(vals)/len(vals) for m, vals in mood_map.items() if vals}
+            if len(mood_avg) < 2:
+                return None
+            best_mood = min(mood_avg, key=lambda k: mood_avg[k])
+            worst_mood = max(mood_avg, key=lambda k: mood_avg[k])
+            return best_mood, mood_avg[best_mood], worst_mood, mood_avg[worst_mood]
+        except Exception as e:
+            logging.error(f"خطا در تحلیل احساسات: {e}")
+            return None
+
+class FoodDatabase:
+    """پایگاه داده ساده غذاها و کربوهیدرات"""
+    def __init__(self):
+        # نام غذا: مقدار کربوهیدرات در هر 100 گرم
+        self.foods = {
+            'برنج': 28,
+            'نان': 50,
+            'سیب زمینی': 17,
+            'سیب': 14,
+            'خرما': 75,
+            'شیر': 5,
+            'ماکارونی': 25,
+            'پرتقال': 12,
+            'شکلات': 60,
+            'کیک': 55,
+            # ...
+        }
+    def get_carb(self, food_name, grams=100):
+        carb_per_100g = self.foods.get(food_name, None)
+        if carb_per_100g is None:
+            return None
+        return carb_per_100g * grams / 100
+
 class GlucoseTracker:
     def __init__(self):
         self.root = tk.Tk()
+        self.load_user_settings()
         self.root.title("مدیریت پیشرفته قند خون")
         self.root.geometry("1200x800")
         self.root.configure(bg='#f0f0f0')
@@ -290,11 +359,21 @@ class GlucoseTracker:
         # سیستم هوش مصنوعی
         self.ai_analyzer = AIAnalyzer()
         
+        # پایگاه داده غذا
+        self.food_db = FoodDatabase()
+        
         # ایجاد رابط کاربری
         self.create_widgets()
         
         # بارگذاری اولیه
         self.load_data()
+
+        # افزودن دکمه امکانات پزشکی پیشرفته به فرم اصلی
+        medical_btn = ttk.Button(self.root, text="امکانات پزشکی پیشرفته", command=self.show_medical_features)
+        medical_btn.pack(side="bottom", pady=10)
+
+        # بارگذاری تنظیمات کاربر
+        self.load_user_settings()
 
     def create_widgets(self):
         """ایجاد رابط کاربری"""
@@ -716,7 +795,7 @@ class GlucoseTracker:
             messagebox.showerror("خطا", f"خطا در پیش‌بینی: {e}")
 
     def analyze_patterns(self):
-        """تحلیل الگوها"""
+        """تحلیل الگوها و نمایش هشدار بحران"""
         try:
             readings = self.db.fetch_recent_readings(30, self.current_user_id)
             
@@ -725,6 +804,13 @@ class GlucoseTracker:
                 return
             
             analysis = self.ai_analyzer.analyze_patterns(readings)
+            
+            # هشدار بحران
+            crisis = self.ai_analyzer.detect_crisis(readings)
+            if crisis:
+                analysis += "\n🚨 هشدار بحران:\n"
+                for c in crisis:
+                    analysis += f"• {c[0]} {c[1]} - مقدار: {c[2]} ({c[3]})\n"
             
             self.analysis_text.delete(1.0, tk.END)
             self.analysis_text.insert(1.0, analysis)
@@ -1122,89 +1208,345 @@ class GlucoseTracker:
             messagebox.showerror("خطا", f"خطا در نمایش نمودار: {e}")
 
     def show_detailed_stats(self):
-        """نمایش آمار تفصیلی"""
+        """نمایش آمار تفصیلی و تحلیل‌های هوشمند تغذیه و احساسات"""
         try:
             readings = self.db.fetch_all_readings(self.current_user_id)
-            
             if not readings:
-                messagebox.showwarning("هشدار", "داده‌ای برای نمایش آمار وجود ندارد")
+                messagebox.showwarning("هشدار", "داده‌ای برای نمایش وجود ندارد")
                 return
-            
             glucose_levels = [reading[5] for reading in readings]
-            
-            # محاسبه آمار
             total_readings = len(glucose_levels)
             avg_glucose = sum(glucose_levels) / total_readings
             min_glucose = min(glucose_levels)
             max_glucose = max(glucose_levels)
-            
-            # تعداد خوانش‌ها در محدوده‌های مختلف
             normal_count = len([g for g in glucose_levels if 70 <= g <= 140])
             high_count = len([g for g in glucose_levels if g > 140])
             low_count = len([g for g in glucose_levels if g < 70])
-            
-            stats_text = f"""آمار تفصیلی قند خون:
+            hba1c = self.ai_analyzer.estimate_hba1c(avg_glucose)
+            mood_corr = self.ai_analyzer.mood_glucose_correlation(readings)
 
-📊 آمار کلی:
-• تعداد کل اندازه‌گیری‌ها: {total_readings}
-• میانگین قند خون: {avg_glucose:.1f} mg/dL
-• کمترین مقدار: {min_glucose} mg/dL
-• بیشترین مقدار: {max_glucose} mg/dL
-
-📈 توزیع بر اساس محدوده:
-• طبیعی (70-140): {normal_count} مورد ({normal_count/total_readings*100:.1f}%)
-• بالا (>140): {high_count} مورد ({high_count/total_readings*100:.1f}%)
-• پایین (<70): {low_count} مورد ({low_count/total_readings*100:.1f}%)
-
-💡 توصیه‌ها:
-"""
-            
-            if avg_glucose > 140:
-                stats_text += "• میانگین قند خون بالا است - با پزشک مشورت کنید\n"
-            elif avg_glucose < 80:
-                stats_text += "• میانگین قند خون پایین است - مراقب کاهش قند باشید\n"
+            # تحلیل احساسات
+            mood_text = ""
+            if mood_corr:
+                best_mood, best_val, worst_mood, worst_val = mood_corr
+                mood_text = f"\nتحلیل احساسات:\n• بهترین حالت روحی: {best_mood} (میانگین قند: {best_val:.1f})\n" \
+                            f"• بدترین حالت روحی: {worst_mood} (میانگین قند: {worst_val:.1f})\n"
             else:
-                stats_text += "• میانگین قند خون در محدوده مطلوب است\n"
-            
-            if high_count > total_readings * 0.3:
-                stats_text += "• تعداد زیادی از خوانش‌ها بالا هستند\n"
-            
-            if low_count > total_readings * 0.1:
-                stats_text += "• مراقب کاهش قند خون باشید\n"
-            
+                mood_text = "\nتحلیل احساسات: داده کافی وجود ندارد."
+
+            # توصیه غذایی هوشمند (نمونه ساده)
+            food_suggestion = self.suggest_food_menu(avg_glucose)
+
+            stats = f"""
+آمار تفصیلی:
+----------------------
+تعداد کل خوانش‌ها: {total_readings}
+میانگین قند خون: {avg_glucose:.1f} mg/dL
+کمترین مقدار: {min_glucose}
+بیشترین مقدار: {max_glucose}
+در محدوده طبیعی: {normal_count}
+بالا: {high_count}
+پایین: {low_count}
+HbA1c تخمینی: {hba1c if hba1c else '-'} %
+{mood_text}
+پیشنهاد منوی غذایی: {food_suggestion}
+----------------------"""
             # نمایش در پنجره جدید
             stats_window = tk.Toplevel(self.root)
-            stats_window.title("آمار تفصیلی")
-            stats_window.geometry("600x500")
-            stats_window.configure(bg='#f0f0f0')
-            
-            text_widget = tk.Text(stats_window, font=self.default_font, wrap="word", padx=20, pady=20)
-            text_widget.pack(fill="both", expand=True, padx=20, pady=20)
-            text_widget.insert(1.0, stats_text)
-            text_widget.config(state="disabled")
-            
+            stats_window.title("آمار تفصیلی و تحلیل هوشمند")
+            stats_window.geometry("500x600")
+            stats_window.configure(bg="#f0f0f0")
+            text = tk.Text(stats_window, font=self.default_font, wrap="word")
+            text.insert(1.0, stats)
+            text.pack(fill="both", expand=True, padx=10, pady=10)
         except Exception as e:
             logging.error(f"خطا در نمایش آمار تفصیلی: {e}")
-            messagebox.showerror("خطا", f"خطا در نمایش آمار: {e}")
+            messagebox.showerror("خطا", f"خطا در نمایش آمار تفصیلی: {e}")
+
+    def show_food_carb_dialog(self):
+        """پنجره محاسبه کربوهیدرات غذا و امکانات هوشمند تغذیه"""
+        try:
+            dialog = tk.Toplevel(self.root)
+            dialog.title("محاسبه کربوهیدرات غذا و امکانات هوشمند")
+            dialog.geometry("400x400")
+            dialog.configure(bg="#f0f0f0")
+
+            ttk.Label(dialog, text="نام غذا:", font=self.default_font).pack(pady=5)
+            food_entry = ttk.Combobox(dialog, values=list(self.food_db.foods.keys()), font=self.default_font)
+            food_entry.pack(pady=5)
+            food_entry.set("برنج")
+
+            ttk.Label(dialog, text="وزن (گرم):", font=self.default_font).pack(pady=5)
+            weight_entry = ttk.Entry(dialog, font=self.default_font)
+            weight_entry.pack(pady=5)
+            weight_entry.insert(0, "100")
+
+            result_label = ttk.Label(dialog, text="", font=self.default_font)
+            result_label.pack(pady=10)
+
+            def calc_carb():
+                food = food_entry.get()
+                try:
+                    weight = int(weight_entry.get())
+                except:
+                    result_label.config(text="وزن باید عدد باشد", foreground="red")
+                    return
+                carb = self.food_db.get_carb(food, weight)
+                if carb is not None:
+                    result_label.config(text=f"کربوهیدرات: {carb:.1f} گرم", foreground="green")
+                else:
+                    result_label.config(text="غذا یافت نشد", foreground="red")
+
+            ttk.Button(dialog, text="محاسبه کربوهیدرات", command=calc_carb).pack(pady=10)
+
+            # امکانات هوشمند: ثبت عکس غذا و تشخیص نوع غذا با AI
+            ttk.Label(dialog, text="یا عکس غذا را انتخاب کنید:", font=self.default_font).pack(pady=5)
+            def recognize_food_image():
+                file_path = filedialog.askopenfilename(title="انتخاب عکس غذا", filetypes=[("Image files", "*.jpg;*.png;*.jpeg")])
+                if not file_path:
+                    return
+                # نمونه: فراخوانی ماژول AI برای تشخیص غذا (در اینجا فقط نام فایل)
+                food_name = self.ai_recognize_food(file_path)
+                if food_name:
+                    food_entry.set(food_name)
+                    result_label.config(text=f"غذا شناسایی شد: {food_name}", foreground="blue")
+                else:
+                    result_label.config(text="تشخیص غذا ناموفق بود", foreground="red")
+            ttk.Button(dialog, text="انتخاب عکس و تشخیص غذا با AI", command=recognize_food_image).pack(pady=5)
+
+            # امکانات: اسکن بارکد/QR (نمونه ساده)
+            ttk.Label(dialog, text="یا بارکد/QR را وارد کنید:", font=self.default_font).pack(pady=5)
+            barcode_entry = ttk.Entry(dialog, font=self.default_font)
+            barcode_entry.pack(pady=5)
+            def recognize_barcode():
+                code = barcode_entry.get().strip()
+                # نمونه: جستجو در پایگاه داده غذا بر اساس بارکد (در اینجا فقط نمایش کد)
+                if code:
+                    result_label.config(text=f"بارکد وارد شده: {code}", foreground="purple")
+                else:
+                    result_label.config(text="بارکد وارد نشده", foreground="red")
+            ttk.Button(dialog, text="تشخیص بارکد/QR", command=recognize_barcode).pack(pady=5)
+
+            # امکانات: تشخیص صوتی (نمونه ساده)
+            ttk.Label(dialog, text="یا نام غذا را بگویید (تشخیص صوتی):", font=self.default_font).pack(pady=5)
+            def recognize_voice():
+                # نمونه: فراخوانی ماژول تشخیص صوتی (در اینجا فقط پیام آزمایشی)
+                result_label.config(text="(تشخیص صوتی فعال نیست - نیاز به ماژول)", foreground="gray")
+            ttk.Button(dialog, text="تشخیص صوتی", command=recognize_voice).pack(pady=5)
+        except Exception as e:
+            logging.error(f"خطا در پنجره کربوهیدرات: {e}")
+            messagebox.showerror("خطا", f"خطا در پنجره کربوهیدرات: {e}")
+
+    def suggest_food_menu(self, avg_glucose):
+        """پیشنهاد منوی غذایی ساده بر اساس میانگین قند خون"""
+        if avg_glucose < 80:
+            return "مصرف غذاهای پرکربوهیدرات با کنترل پزشک"
+        elif avg_glucose > 180:
+            return "پرهیز از قند و کربوهیدرات بالا، مصرف سبزیجات و پروتئین"
+        else:
+            return "رژیم متعادل با میوه، سبزیجات و غلات کامل"
+
+    def ai_recognize_food(self, image_path):
+        """تشخیص نوع غذا از روی عکس (نمونه - نیاز به ماژول AI واقعی)"""
+        # در نسخه واقعی: استفاده از مدل AI برای تشخیص غذا
+        # اینجا فقط نام فایل را به عنوان نام غذا بازمی‌گرداند
+        import os
+        name = os.path.splitext(os.path.basename(image_path))[0]
+        # اگر نام غذا در پایگاه داده بود، همان را برگرداند
+        for food in self.food_db.foods:
+            if food in name:
+                return food
+        return None
 
     def run(self):
-        """اجرای برنامه"""
+        """اجرای برنامه (حلقه اصلی)"""
         try:
-            # بارگذاری یادآوری‌ها
-            self.load_reminders()
-            
-            # شروع حلقه اصلی
             self.root.mainloop()
-            
         except Exception as e:
+            import logging
             logging.error(f"خطا در اجرای برنامه: {e}")
-            messagebox.showerror("خطا", f"خطا در اجرای برنامه: {e}")
+            raise
 
-# اجرای برنامه
-if __name__ == "__main__":
-    try:
-        app = GlucoseTracker()
-        app.run()
-    except Exception as e:
-        logging.error(f"خطا در شروع برنامه: {e}")
-        print(f"خطا در شروع برنامه: {e}")
+    def show_medical_features(self):
+        """پنجره امکانات پزشکی پیشرفته (فاز ۳) با امکان حذف سوابق"""
+        try:
+            dialog = tk.Toplevel(self.root)
+            dialog.title("امکانات پزشکی پیشرفته")
+            dialog.geometry("400x650")
+            dialog.configure(bg="#f0f0f0")
+
+            ttk.Label(dialog, text="امکانات پزشکی:", font=self.default_font).pack(pady=10)
+            ttk.Button(dialog, text="ارسال هشدار اورژانس", command=self.send_emergency_alert).pack(pady=8)
+            ttk.Button(dialog, text="اتصال به پزشک (آنلاین)", command=self.connect_to_doctor).pack(pady=8)
+            ttk.Button(dialog, text="یادآوری ویزیت بعدی", command=self.set_visit_reminder).pack(pady=8)
+            ttk.Button(dialog, text="ثبت علائم جانبی", command=self.log_side_effects).pack(pady=8)
+            ttk.Button(dialog, text="نسخه موبایل/ویجت (آزمایشی)", command=self.show_mobile_widget_info).pack(pady=8)
+
+            # نمایش تاریخچه هشدار اورژانس با امکان حذف
+            ttk.Label(dialog, text="تاریخچه هشدار اورژانس:", font=self.default_font).pack(pady=10)
+            emergency_box = tk.Listbox(dialog, height=4, font=self.default_font)
+            emergency_box.pack(fill="x", padx=10)
+            for dt in getattr(self, 'emergency_history', []):
+                emergency_box.insert(tk.END, dt)
+            def delete_emergency():
+                sel = emergency_box.curselection()
+                if sel:
+                    idx = sel[0]
+                    if hasattr(self, 'emergency_history'):
+                        del self.emergency_history[idx]
+                        emergency_box.delete(idx)
+            ttk.Button(dialog, text="حذف مورد انتخابی", command=delete_emergency).pack(pady=3)
+
+            # نمایش تاریخچه علائم جانبی با امکان حذف
+            ttk.Label(dialog, text="تاریخچه علائم جانبی:", font=self.default_font).pack(pady=10)
+            side_box = tk.Listbox(dialog, height=6, font=self.default_font)
+            side_box.pack(fill="x", padx=10)
+            for dt, txt in getattr(self, 'side_effects_history', []):
+                side_box.insert(tk.END, f"{dt}: {txt}")
+            def delete_side_effect():
+                sel = side_box.curselection()
+                if sel:
+                    idx = sel[0]
+                    if hasattr(self, 'side_effects_history'):
+                        del self.side_effects_history[idx]
+                        side_box.delete(idx)
+            ttk.Button(dialog, text="حذف مورد انتخابی", command=delete_side_effect).pack(pady=3)
+        except Exception as e:
+            logging.error(f"خطا در امکانات پزشکی: {e}")
+            messagebox.showerror("خطا", f"خطا در امکانات پزشکی: {e}")
+
+    def send_emergency_alert(self):
+        """ارسال هشدار اورژانس و ثبت در تاریخچه"""
+        from datetime import datetime
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        if not hasattr(self, 'emergency_history'):
+            self.emergency_history = []
+        self.emergency_history.append(now)
+        messagebox.showinfo("هشدار اورژانس", f"هشدار اورژانس ارسال شد!\nزمان: {now}")
+
+    def connect_to_doctor(self):
+        """اتصال به پزشک آنلاین (نمونه)"""
+        messagebox.showinfo("اتصال به پزشک", "در حال اتصال به پزشک... (نمونه)")
+
+    def set_visit_reminder(self):
+        """ثبت یادآوری ویزیت با انتخاب تاریخ و ساعت"""
+        import datetime
+        dialog = tk.Toplevel(self.root)
+        dialog.title("یادآوری ویزیت")
+        dialog.geometry("350x200")
+        dialog.configure(bg="#f0f0f0")
+        ttk.Label(dialog, text="تاریخ ویزیت (YYYY-MM-DD):", font=self.default_font).pack(pady=5)
+        date_entry = ttk.Entry(dialog, font=self.default_font)
+        date_entry.pack(pady=5)
+        ttk.Label(dialog, text="ساعت (HH:MM):", font=self.default_font).pack(pady=5)
+        time_entry = ttk.Entry(dialog, font=self.default_font)
+        time_entry.pack(pady=5)
+        def save_reminder():
+            date = date_entry.get().strip()
+            time = time_entry.get().strip()
+            try:
+                datetime.datetime.strptime(date, "%Y-%m-%d")
+                datetime.datetime.strptime(time, "%H:%M")
+                messagebox.showinfo("یادآوری ثبت شد", f"ویزیت بعدی: {date} ساعت {time}")
+                dialog.destroy()
+            except Exception:
+                messagebox.showerror("خطا", "فرمت تاریخ یا ساعت صحیح نیست.")
+        ttk.Button(dialog, text="ثبت یادآوری", command=save_reminder).pack(pady=10)
+
+    def log_side_effects(self):
+        """ثبت علائم جانبی و نمایش تاریخچه"""
+        from datetime import datetime
+        if not hasattr(self, 'side_effects_history'):
+            self.side_effects_history = []
+        dialog = tk.Toplevel(self.root)
+        dialog.title("ثبت علائم جانبی")
+        dialog.geometry("400x350")
+        dialog.configure(bg="#f0f0f0")
+        ttk.Label(dialog, text="علائم جانبی را وارد کنید:", font=self.default_font).pack(pady=10)
+        entry = ttk.Entry(dialog, font=self.default_font, width=40)
+        entry.pack(pady=5)
+        def save_effect():
+            text = entry.get().strip()
+            if text:
+                now = datetime.now().strftime("%Y-%m-%d %H:%M")
+                self.side_effects_history.append((now, text))
+                messagebox.showinfo("ثبت شد", "علائم جانبی ثبت شد.")
+                entry.delete(0, tk.END)
+                update_history()
+        ttk.Button(dialog, text="ثبت", command=save_effect).pack(pady=5)
+        ttk.Label(dialog, text="تاریخچه علائم:", font=self.default_font).pack(pady=10)
+        history_box = tk.Text(dialog, height=8, font=self.default_font)
+        history_box.pack(fill="both", expand=True, padx=10)
+        def update_history():
+            history_box.delete(1.0, tk.END)
+            for dt, txt in getattr(self, 'side_effects_history', []):
+                history_box.insert(tk.END, f"{dt}: {txt}\n")
+        update_history()
+
+    def show_mobile_widget_info(self):
+        """نمایش اطلاعات نسخه موبایل/ویجت (نمونه)"""
+        messagebox.showinfo("نسخه موبایل/ویجت", "نسخه موبایل و ویجت در دست توسعه است.")
+
+    def show_settings_dialog(self):
+        """پنجره تنظیمات شخصی‌سازی و تجربه کاربری"""
+        import json
+        dialog = tk.Toplevel(self.root)
+        dialog.title("تنظیمات شخصی‌سازی")
+        dialog.geometry("400x400")
+        dialog.configure(bg="#f0f0f0")
+
+        # رنگ پس‌زمینه
+        ttk.Label(dialog, text="رنگ پس‌زمینه:", font=self.default_font).pack(pady=5)
+        color_var = tk.StringVar(value=self.root['bg'])
+        color_entry = ttk.Entry(dialog, textvariable=color_var, font=self.default_font)
+        color_entry.pack(pady=5)
+
+        # فونت
+        ttk.Label(dialog, text="فونت:", font=self.default_font).pack(pady=5)
+        font_var = tk.StringVar(value=self.default_font[0])
+        font_entry = ttk.Entry(dialog, textvariable=font_var, font=self.default_font)
+        font_entry.pack(pady=5)
+
+        # هشدار صوتی
+        sound_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(dialog, text="فعال‌سازی هشدار صوتی", variable=sound_var).pack(pady=5)
+
+        # دکمه ذخیره
+        def save_settings():
+            settings = {
+                'bg_color': color_var.get(),
+                'font': font_var.get(),
+                'sound': sound_var.get()
+            }
+            with open('user_settings.json', 'w', encoding='utf-8') as f:
+                json.dump(settings, f, ensure_ascii=False, indent=2)
+            self.apply_user_settings(settings)
+            messagebox.showinfo("ذخیره شد", "تنظیمات ذخیره شد.")
+            dialog.destroy()
+        ttk.Button(dialog, text="ذخیره تنظیمات", command=save_settings).pack(pady=20)
+
+    def apply_user_settings(self, settings):
+        """اعمال تنظیمات شخصی‌سازی"""
+        self.root.configure(bg=settings.get('bg_color', '#f0f0f0'))
+        self.default_font = (settings.get('font', 'Tahoma'), 10)
+        # (در صورت نیاز: بازآفرینی ویجت‌ها با فونت جدید)
+
+    def load_user_settings(self):
+        """بارگذاری تنظیمات کاربر از فایل"""
+        import json
+        try:
+            with open('user_settings.json', 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+            self.apply_user_settings(settings)
+        except Exception:
+            pass
+
+    # فراخوانی در __init__:
+    # self.load_user_settings()
+
+    # افزودن گزینه به منوی اصلی:
+    # menu = tk.Menu(self.root)
+    # self.root.config(menu=menu)
+    # settings_menu = tk.Menu(menu, tearoff=0)
+    # menu.add_cascade(label="تنظیمات", menu=settings_menu)
+    # settings_menu.add_command(label="شخصی‌سازی...", command=self.show_settings_dialog)
